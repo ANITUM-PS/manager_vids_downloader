@@ -77,18 +77,20 @@ def overlay_text(img, text):
     cv2.putText(overlay, text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
     return overlay
 
-def download_videos_by_timestamps(x):
+def download_videos_by_timestamps(selected_keys):
     hhmm_map = parse_docx_group_by_HHMM(DOCX_FILE)
-    all_keys = list(hhmm_map.keys())
-    selected_keys = random.sample(all_keys, min(x, len(all_keys)))
-
     downloaded_log = load_log()
     s3 = boto3.client("s3", region_name=AWS_REGION)
 
     channel_list = ['channel502'] + [f'channel{i}' for i in range(602, 2403, 100)]
 
-    for (date, hhmm) in selected_keys:
-        related_entries = hhmm_map[(date, hhmm)]
+    for key in selected_keys:
+        if key not in hhmm_map:
+            print(f"⚠️ Skipping {key}: not found in document.")
+            continue
+
+        related_entries = hhmm_map[key]
+        date, hhmm = key
         base_ts = f"{date}T{hhmm}"
         folder_path = os.path.join(BASE_DIR, base_ts)
         os.makedirs(folder_path, exist_ok=True)
@@ -117,7 +119,17 @@ def download_videos_by_timestamps(x):
 
 def main():
     x = int(input("Enter number of HHMM timestamps to process: "))
-    download_videos_by_timestamps(x)
+    selected_keys = []
+
+    for i in range(x):
+        ts = input(f"Enter timestamp {i+1} in <YYYYMMDD>THHMM format (e.g., 20250624T1921): ").strip()
+        if not re.match(r'^\d{8}T\d{4}$', ts):
+            print("❌ Invalid format. Please use YYYYMMDDTHHMM.")
+            return
+        date, hhmm = ts[:8], ts[9:]
+        selected_keys.append((date, hhmm))
+
+    download_videos_by_timestamps(selected_keys)
 
 if __name__ == "__main__":
     main()

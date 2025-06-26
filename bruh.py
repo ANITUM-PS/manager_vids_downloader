@@ -12,6 +12,7 @@ click_coords = None
 grid_info = {}
 pending_classification = None
 paused = False
+classified_videos = set()  # Track which videos have been manually classified
 
 def get_available_folders(base_path):
     """Get all available folders in the base path"""
@@ -79,13 +80,37 @@ def extract_label_and_info(filename):
     else:
         return base, base, "UNKNOWN"  # fallback
 
-def draw_label_below(frame, text, width=320, height=240, highlight=False):
+def load_existing_classifications(csv_filename="video_classifications.csv"):
+    """Load existing classifications from CSV to avoid duplicates"""
+    existing = set()
+    if os.path.exists(csv_filename):
+        try:
+            with open(csv_filename, 'r') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    existing.add(row['video_name'])
+        except Exception as e:
+            print(f"Warning: Could not read existing CSV file: {e}")
+    return existing
+
+def draw_label_below(frame, text, width=320, height=240, highlight=False, classified=False):
     label_height = 30
-    # Use different color for highlighted video
-    bg_color = (0, 100, 0) if highlight else (0, 0, 0)
+    # Use different colors: green for highlighted, blue for classified, black for default
+    if highlight:
+        bg_color = (0, 100, 0)  # Green for currently selected
+    elif classified:
+        bg_color = (100, 0, 0)  # Blue for already classified
+    else:
+        bg_color = (0, 0, 0)    # Black for unclassified
+    
     label = np.full((label_height, width, 3), bg_color, dtype=np.uint8)
     font = cv2.FONT_HERSHEY_SIMPLEX
     text_color = (255, 255, 255)
+    
+    # Add indicator for classified videos
+    if classified:
+        text = f"{text} ✓"
+    
     cv2.putText(label, text, (5, 20), font, 0.6, text_color, 1)
     return np.vstack((frame, label))
 
@@ -119,9 +144,15 @@ def draw_status_bar(frame):
     pause_text = "[PAUSED]" if paused else "[PLAYING]"
     pause_color = (0, 255, 255) if paused else (0, 255, 0)
     
+    # Show classification count
+    classified_count = len(classified_videos)
+    total_videos = grid_info.get('total_videos', 0)
+    
     if pending_classification is None:
-        cv2.putText(status_bar, f"{pause_text} Click video to classify | SPACE=Pause/Play | R=Rewind | Q=Quit", 
-                   (10, 25), font, 0.5, pause_color, 1)
+        cv2.putText(status_bar, f"{pause_text} Click video to classify | Classified: {classified_count}/{total_videos} | SPACE=Pause/Play | R=Rewind | Q=Quit", 
+                   (10, 15), font, 0.4, pause_color, 1)
+        cv2.putText(status_bar, "Blue videos = already classified | Green = selected | Q will auto-classify remaining", 
+                   (10, 30), font, 0.35, (200, 200, 200), 1)
     else:
         cv2.putText(status_bar, f"{pause_text} Classification mode: Press T/F or ESC to cancel", 
                    (10, 25), font, 0.5, (0, 255, 255), 1)
@@ -180,6 +211,24 @@ def save_to_csv(original_name, model_status, manual_status, csv_filename="video_
     
     print(f"✓ Saved: {original_name} | Model: {model_status} | Manual: {manual_status}")
 
+def save_unclassified_videos(video_info, csv_filename="video_classifications.csv"):
+    """Save all unclassified videos with their model status as manual status"""
+    unclassified_count = 0
+    
+    for info in video_info:
+        if info['original_name'] not in classified_videos:
+            save_to_csv(
+                info['original_name'], 
+                info['model_status'], 
+                info['model_status']  # Use model status as manual status for unclassified
+            )
+            unclassified_count += 1
+    
+    if unclassified_count > 0:
+        print(f"✓ Auto-classified {unclassified_count} remaining videos with model predictions")
+    
+    return unclassified_count
+
 def print_summary(csv_filename="video_classifications.csv"):
     """Print a summary of classifications when quitting"""
     if os.path.exists(csv_filename):
@@ -194,16 +243,25 @@ def print_summary(csv_filename="video_classifications.csv"):
                 print("="*60)
                 print(f"Total classifications: {len(data)}")
                 
-                # Count agreements/disagreements
-                agreements = sum(1 for row in data if row['model_status'] == row['manual_status'])
-                disagreements = len(data) - agreements
+                # Count manual vs auto classifications
+                manual_count = len(classified_videos)
+                auto_count = len(data) - manual_count
                 
-                print(f"Model-Manual agreements: {agreements}")
-                print(f"Model-Manual disagreements: {disagreements}")
+                print(f"Manual classifications: {manual_count}")
+                print(f"Auto classifications (model predictions): {auto_count}")
                 
-                if len(data) > 0:
-                    accuracy = (agreements / len(data)) * 100
-                    print(f"Agreement rate: {accuracy:.1f}%")
+                # Count agreements/disagreements (only for manually classified)
+                if manual_count > 0:
+                    manual_data = [row for row in data if row['video_name'] in classified_videos]
+                    agreements = sum(1 for row in manual_data if row['model_status'] == row['manual_status'])
+                    disagreements = len(manual_data) - agreements
+                    
+                    print(f"Manual-Model agreements: {agreements}")
+                    print(f"Manual-Model disagreements: {disagreements}")
+                    
+                    if len(manual_data) > 0:
+                        accuracy = (agreements / len(manual_data)) * 100
+                        print(f"Agreement rate (manual only): {accuracy:.1f}%")
                 
                 print(f"\nData saved to: {csv_filename}")
                 print("="*60)
@@ -211,7 +269,7 @@ def print_summary(csv_filename="video_classifications.csv"):
             print(f"Could not read summary from {csv_filename}: {e}")
 
 def main():
-    global click_coords, grid_info, pending_classification, paused
+    global click_coords, grid_info, pending_classification, paused, classified_videos
     
     base_path = os.path.expanduser("~/Downloads/managerVids")
     
@@ -234,9 +292,13 @@ def main():
     print("  - 'T' for FOUND (manager is present)")
     print("  - 'F' for NOT_FOUND (manager is not present)")
     print("  - 'ESC' to cancel selection")
-    print("• Press 'Q' to quit and see summary")
+    print("• Press 'Q' to quit - unclassified videos will be auto-classified with model predictions")
+    print("• Blue videos = already classified manually")
     print("• Results are automatically saved to 'video_classifications.csv'")
     print("-" * 60)
+
+    # Load existing classifications to avoid duplicates
+    existing_classifications = load_existing_classifications()
 
     video_files = sorted(glob.glob(os.path.join(folder, "*.*")))
     video_files = [f for f in video_files if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))]
@@ -259,6 +321,13 @@ def main():
             'original_name': original_name,
             'model_status': model_status
         })
+        
+        # Mark as classified if already in CSV
+        if original_name in existing_classifications:
+            classified_videos.add(original_name)
+
+    if classified_videos:
+        print(f"Found {len(classified_videos)} already classified videos (marked in blue)")
 
     frame_width, frame_height = 320, 240
     video_done = [False] * len(caps)
@@ -310,13 +379,14 @@ def main():
                 else:
                     frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
 
-                # Highlight if this video is being classified
+                # Check if this video is highlighted or classified
                 highlight = (pending_classification is not None and 
                             pending_classification['index'] == i)
+                classified = info['original_name'] in classified_videos
                 
                 labeled_frame = draw_label_below(frame, info['label'], 
                                                width=frame_width, height=frame_height,
-                                               highlight=highlight)
+                                               highlight=highlight, classified=classified)
                 frames.append(labeled_frame)
 
             if all(video_done) and not paused:
@@ -355,6 +425,9 @@ def main():
             key = cv2.waitKey(30) & 0xFF
             
             if key == ord('q') or key == ord('Q'):
+                # Save unclassified videos before quitting
+                print("\nSaving unclassified videos with model predictions...")
+                unclassified_count = save_unclassified_videos(video_info)
                 break
             elif key == ord(' '):  # Spacebar to pause/unpause
                 paused = not paused
@@ -366,19 +439,23 @@ def main():
                 # We're in classification mode
                 if key == ord('t') or key == ord('T'):
                     # User says FOUND
+                    original_name = pending_classification['original_name']
                     save_to_csv(
-                        pending_classification['original_name'],
+                        original_name,
                         pending_classification['model_status'],
                         'FOUND'
                     )
+                    classified_videos.add(original_name)
                     pending_classification = None
                 elif key == ord('f') or key == ord('F'):
                     # User says NOT_FOUND
+                    original_name = pending_classification['original_name']
                     save_to_csv(
-                        pending_classification['original_name'],
+                        original_name,
                         pending_classification['model_status'],
                         'NOT_FOUND'
                     )
+                    classified_videos.add(original_name)
                     pending_classification = None
                 elif key == 27:  # ESC key
                     print("Classification cancelled")
@@ -393,19 +470,26 @@ def main():
                 
                 if clicked_index is not None and clicked_index < len(video_info):
                     info = video_info[clicked_index]
-                    print(f"Selected: {info['original_name']} (Model: {info['model_status']}) -> Press T/F to classify...")
                     
-                    # Enter classification mode
-                    pending_classification = {
-                        'index': clicked_index,
-                        'original_name': info['original_name'],
-                        'model_status': info['model_status']
-                    }
+                    # Check if already classified
+                    if info['original_name'] in classified_videos:
+                        print(f"Video {info['original_name']} is already classified. Skipping...")
+                    else:
+                        print(f"Selected: {info['original_name']} (Model: {info['model_status']}) -> Press T/F to classify...")
+                        
+                        # Enter classification mode
+                        pending_classification = {
+                            'index': clicked_index,
+                            'original_name': info['original_name'],
+                            'model_status': info['model_status']
+                        }
                 
                 click_coords = None  # Reset click coordinates
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
+        print("Saving unclassified videos with model predictions...")
+        save_unclassified_videos(video_info)
     finally:
         for cap in caps:
             cap.release()
