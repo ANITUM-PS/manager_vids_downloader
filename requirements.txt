@@ -1,0 +1,6 @@
+boto3
+python-docx
+opencv-python
+numpy
+ 
+ #pip install -r requirements.txt
