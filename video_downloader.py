@@ -6,6 +6,7 @@ import random
 import numpy as np
 import cv2
 from docx import Document
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 # ====== CONFIGURATION ======
@@ -118,18 +119,47 @@ def download_videos_by_timestamps(selected_keys):
     print("🎉 All downloads complete.")
 
 def main():
-    x = int(input("Enter number of HHMM timestamps to process: "))
-    selected_keys = []
-
-    for i in range(x):
-        ts = input(f"Enter timestamp {i+1} in <YYYYMMDD>THHMM format (e.g., 20250624T1921): ").strip()
-        if not re.match(r'^\d{8}T\d{4}$', ts):
+    try:
+        target_count = int(input("Enter number of timestamps to process with at least one video: "))
+        start_ts = input("Enter starting timestamp in <YYYYMMDD>THHMM format (e.g., 20250624T1921): ").strip()
+        if not re.match(r'^\d{8}T\d{4}$', start_ts):
             print("❌ Invalid format. Please use YYYYMMDDTHHMM.")
             return
-        date, hhmm = ts[:8], ts[9:]
-        selected_keys.append((date, hhmm))
 
-    download_videos_by_timestamps(selected_keys)
+        found_count = 0
+        current_time = datetime.strptime(start_ts, "%Y%m%dT%H%M")
+        end_of_day = datetime.strptime(start_ts[:8] + "T2359", "%Y%m%dT%H%M")
+        selected_keys = []
+
+        hhmm_map = parse_docx_group_by_HHMM(DOCX_FILE)
+        downloaded_log = load_log()
+
+        while found_count < target_count and current_time <= end_of_day:
+            date_str = current_time.strftime("%Y%m%d")
+            hhmm_str = current_time.strftime("%H%M")
+            key = (date_str, hhmm_str)
+
+            if key in hhmm_map:
+                temp_log = set(downloaded_log)  # Snapshot before
+                download_videos_by_timestamps([key])
+                downloaded_log = load_log()  # Reload after
+                if len(downloaded_log) > len(temp_log):
+                    found_count += 1
+                    print(f"✅ Count {found_count}/{target_count} fulfilled at {key}")
+                else:
+                    print(f"ℹ️ No videos downloaded for {key}, skipping count.")
+            else:
+                print(f"⚠️ {key} not in DOCX entries, skipping.")
+
+            current_time += timedelta(minutes=1)
+
+        if found_count < target_count:
+            print(f"⏹️ Stopped at end of day. Only {found_count}/{target_count} timestamps fulfilled.")
+        else:
+            print("🎉 Target timestamps processed with videos downloaded.")
+
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
 
 if __name__ == "__main__":
     main()
